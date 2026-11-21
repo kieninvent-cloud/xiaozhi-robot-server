@@ -105,7 +105,8 @@ def _cleanup_old_cache(music_dir: str, max_files: int = 15):
 async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name: str, cookies_path: str | None, logger):
     out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
 
-    # Download native mp3/m4a/opus directly WITHOUT ffmpeg re-encoding (10x faster on 0.1 vCPU!)
+    # Prefer native mp3 (yt-dlp skips ffmpeg re-encoding automatically when already mp3!)
+    # and guarantee .mp3 output so pydub AudioSegment.from_file(..., format="mp3") ALWAYS works.
     cmd = [
         sys.executable,
         "-m",
@@ -121,7 +122,12 @@ async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name:
         "--match-filter",
         "duration >= 45 & duration <= 480",
         "-f",
-        "bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[abr<=128]/bestaudio",
+        "bestaudio[ext=mp3]/bestaudio[abr<=128]/bestaudio",
+        "-x",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "5",
         "--default-search",
         search_prefix,
         "-o",
