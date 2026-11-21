@@ -250,4 +250,6 @@ class LLMProvider(LLMProviderBase):
                         f"共计 {getattr(usage_info, 'total_tokens', '未知')}"
                     )
         finally:
+            if not is_thinking and buffer:
+                yield buffer, None
             stream.close()

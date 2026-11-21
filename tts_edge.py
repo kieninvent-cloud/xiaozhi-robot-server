@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import re
 import uuid
@@ -7,6 +9,18 @@ from datetime import datetime
 import edge_tts
 import httpx
 from core.providers.tts.base import TTSProviderBase
+
+SETTINGS_FILE = os.path.abspath("./data/web_settings.json")
+
+
+def _load_live_tts_settings():
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
 
 
 class TTSProvider(TTSProviderBase):
@@ -21,8 +35,9 @@ class TTSProvider(TTSProviderBase):
         if config.get("private_voice"):
             self.voice = config.get("private_voice")
         else:
-            self.voice = config.get("voice")
+            self.voice = config.get("voice", "vi-VN-HoaiMyNeural")
         self.audio_file_type = config.get("format", "mp3")
+        self.tts_engine = config.get("tts_engine", "google")
 
         volume = config.get("volume", "0")
         self.volume = int(volume) if volume else 0
@@ -39,7 +54,7 @@ class TTSProvider(TTSProviderBase):
         self.edge_volume = f"{self.volume:+}%"
         self.edge_pitch = f"{self.pitch_rate:+}Hz"
         self._http = httpx.AsyncClient(
-            timeout=6.0,
+            timeout=12.0,
             headers={"User-Agent": "Mozilla/5.0"},
         )
 
@@ -72,55 +87,70 @@ class TTSProvider(TTSProviderBase):
             chunks.append(cur)
         return chunks
 
-    async def _google_tts_bytes(self, text: str) -> bytes:
+    async def _fetch_google_chunk(self, chunk: str, speed: float = 1.0) -> bytes:
+        q = urllib.parse.quote(chunk)
+        ttsspeed = max(0.5, min(1.5, speed))
+        url = f"https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&ttsspeed={ttsspeed}&q={q}"
+        for attempt in range(2):
+            resp = await self._http.get(url)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+            await asyncio.sleep(0.25)
+        raise RuntimeError(f"Google TTS HTTP {resp.status_code}")
+
+    async def _google_tts_bytes(self, text: str, rate_pct: int = 0) -> bytes:
         chunks = self._split_chunks(text, max_len=180)
         if not chunks:
             return b""
-        audio = bytearray()
-        for chunk in chunks:
-            q = urllib.parse.quote(chunk)
-            url = f"https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q={q}"
-            resp = await self._http.get(url)
-            if resp.status_code == 200 and resp.content:
-                audio.extend(resp.content)
-            else:
-                raise RuntimeError(f"Google TTS HTTP {resp.status_code}")
-        return bytes(audio)
+        speed = 1.0 + (rate_pct / 100.0)
+        # Fetch all chunks in parallel for zero pause on long paragraphs!
+        results = await asyncio.gather(
+            *(self._fetch_google_chunk(c, speed) for c in chunks)
+        )
+        return b"".join(results)
 
-    async def text_to_speak(self, text, output_file):
-        # Fast path: Google Vietnamese TTS (~0.3-0.8s, no EdgeTTS throttling)
-        try:
-            audio_bytes = await self._google_tts_bytes(text)
-            if audio_bytes:
-                if output_file:
-                    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-                    with open(output_file, "wb") as f:
-                        f.write(audio_bytes)
-                    return None
-                return audio_bytes
-        except Exception:
-            pass
-
-        # Fallback: EdgeTTS
-        try:
-            communicate = edge_tts.Communicate(
-                text,
-                voice=self.voice,
-                rate=self.edge_rate,
-                volume=self.edge_volume,
-                pitch=self.edge_pitch,
-            )
-            if output_file:
-                os.makedirs(os.path.dirname(output_file), exist_ok=True)
-                with open(output_file, "wb") as f:
-                    async for chunk in communicate.stream():
-                        if chunk["type"] == "audio":
-                            f.write(chunk["data"])
-            else:
-                audio_bytes = b""
+    async def _edge_tts_bytes(self, text: str, voice: str, rate_pct: int, pitch_hz: int) -> bytes:
+        rate_str = f"{rate_pct:+}%"
+        pitch_str = f"{pitch_hz:+}Hz"
+        last_err = None
+        for _ in range(2):
+            try:
+                communicate = edge_tts.Communicate(
+                    text,
+                    voice=voice,
+                    rate=rate_str,
+                    volume="+0%",
+                    pitch=pitch_str,
+                )
+                audio_bytes = bytearray()
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
-                        audio_bytes += chunk["data"]
-                return audio_bytes
-        except Exception as e:
-            raise Exception(f"TTS请求失败: {e}")
+                        audio_bytes.extend(chunk["data"])
+                if audio_bytes:
+                    return bytes(audio_bytes)
+            except Exception as e:
+                last_err = e
+                await asyncio.sleep(0.3)
+        raise RuntimeError(f"Edge TTS failed: {last_err}")
+
+    async def text_to_speak(self, text, output_file):
+        live = _load_live_tts_settings()
+        engine = live.get("tts_engine", self.tts_engine)
+        rate_pct = int(live.get("tts_rate", self.speech_rate) or 0)
+        pitch_hz = int(live.get("tts_pitch", self.pitch_rate) or 0)
+
+        # Locked single voice per user choice (no random voice switching!)
+        if engine == "edge_female":
+            audio_bytes = await self._edge_tts_bytes(text, "vi-VN-HoaiMyNeural", rate_pct, pitch_hz)
+        elif engine == "edge_male":
+            audio_bytes = await self._edge_tts_bytes(text, "vi-VN-NamMinhNeural", rate_pct, pitch_hz)
+        else:
+            # Default: Google Vietnamese TTS (fast, consistent, parallel chunks)
+            audio_bytes = await self._google_tts_bytes(text, rate_pct)
+
+        if output_file:
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, "wb") as f:
+                f.write(audio_bytes)
+            return None
+        return audio_bytes
