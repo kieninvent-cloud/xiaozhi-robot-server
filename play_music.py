@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import glob
 import hashlib
 import os
 import re
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
 
 TAG = __name__
 
+AUDIO_EXTS = (".mp3", ".m4a", ".opus", ".ogg", ".wav", ".p3")
+
 play_music_function_desc = {
     "type": "function",
     "function": {
@@ -25,7 +28,7 @@ play_music_function_desc = {
             "properties": {
                 "song_name": {
                     "type": "string",
-                    "description": "Tên bài hát (kèm ca sĩ nếu có). Nếu người dùng chỉ nói 'mở nhạc' mà không nêu tên bài cụ thể thì đặt là 'nhạc trẻ Việt Nam hay nhất'.",
+                    "description": "Tên bài hát chuẩn tiếng Việt (kèm tên ca sĩ nếu biết, ví dụ 'Nơi Này Có Anh Sơn Tùng M-TP', 'Sóng Gió Jack'). Nếu người dùng chỉ nói 'mở nhạc' mà không nêu tên bài cụ thể thì đặt là 'nhạc trẻ Việt Nam hay nhất'.",
                 }
             },
             "required": ["song_name"],
@@ -51,7 +54,7 @@ async def play_music(conn: "ConnectionHandler", song_name: str):
         return ActionResponse(
             action=Action.RESPONSE,
             result=str(e),
-            response="Xin lỗi, mình chưa tìm thấy bài hát này. Bạn thử nói tên bài khác nhé.",
+            response="Xin lỗi, mình chưa tìm thấy bài hát này. Bạn thử nói rõ tên bài hát và ca sĩ nhé.",
         )
 
 
@@ -65,7 +68,7 @@ def _get_music_dir(conn: "ConnectionHandler") -> str:
 
 def _find_cached_file(query: str, music_dir: str):
     music_files = [
-        f for f in os.listdir(music_dir) if f.lower().endswith((".mp3", ".wav", ".p3"))
+        f for f in os.listdir(music_dir) if f.lower().endswith(AUDIO_EXTS)
     ]
     if not music_files:
         return None
@@ -83,11 +86,11 @@ def _find_cached_file(query: str, music_dir: str):
     return best_match
 
 
-def _cleanup_old_cache(music_dir: str, max_files: int = 20):
+def _cleanup_old_cache(music_dir: str, max_files: int = 15):
     files = [
         os.path.join(music_dir, f)
         for f in os.listdir(music_dir)
-        if f.lower().endswith((".mp3", ".wav", ".p3"))
+        if f.lower().endswith(AUDIO_EXTS)
     ]
     if len(files) <= max_files:
         return
@@ -99,7 +102,10 @@ def _cleanup_old_cache(music_dir: str, max_files: int = 20):
             pass
 
 
-async def _run_yt_dlp(search_prefix: str, query: str, out_template: str, target_mp3: str, cookies_path: str | None, logger):
+async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name: str, cookies_path: str | None, logger):
+    out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
+
+    # Download native mp3/m4a/opus directly WITHOUT ffmpeg re-encoding (10x faster on 0.1 vCPU!)
     cmd = [
         sys.executable,
         "-m",
@@ -108,13 +114,14 @@ async def _run_yt_dlp(search_prefix: str, query: str, out_template: str, target_
         "--no-warnings",
         "--no-playlist",
         "--force-overwrites",
+        "--socket-timeout",
+        "10",
+        "--retries",
+        "2",
+        "--match-filter",
+        "duration >= 45 & duration <= 480",
         "-f",
-        "bestaudio[abr<=128]/bestaudio",
-        "-x",
-        "--audio-format",
-        "mp3",
-        "--audio-quality",
-        "5",
+        "bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[abr<=128]/bestaudio",
         "--default-search",
         search_prefix,
         "-o",
@@ -124,34 +131,40 @@ async def _run_yt_dlp(search_prefix: str, query: str, out_template: str, target_
     if cookies_path and os.path.exists(cookies_path):
         cmd.extend(["--cookies", cookies_path])
 
-    logger.bind(tag=TAG).info(f"Đang tải nhạc ({search_prefix}): {query}")
+    logger.bind(tag=TAG).info(f"Đang tải nhanh ({search_prefix}): {query}")
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=35)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
     except asyncio.TimeoutError:
         proc.kill()
         raise RuntimeError(f"Tải nhạc ({search_prefix}) quá thời gian chờ")
 
-    if proc.returncode != 0 or not os.path.exists(target_mp3):
+    matches = [
+        p for p in glob.glob(os.path.join(music_dir, f"{base_name}.*"))
+        if p.lower().endswith(AUDIO_EXTS)
+    ]
+    if proc.returncode != 0 or not matches:
         err_msg = stderr.decode("utf-8", errors="ignore")[-300:]
         raise RuntimeError(f"{search_prefix} lỗi ({proc.returncode}): {err_msg}")
 
-    return target_mp3
+    return matches[0]
 
 
 async def _download_online_music(query: str, music_dir: str, logger):
     safe_slug = re.sub(r"[^\w\s-]", "", query, flags=re.UNICODE).strip()[:40]
     short_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:6]
     base_name = f"{safe_slug}_{short_hash}" if safe_slug else f"song_{short_hash}"
-    out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
-    target_mp3 = os.path.join(music_dir, f"{base_name}.mp3")
 
-    if os.path.exists(target_mp3):
-        return target_mp3
+    existing = [
+        p for p in glob.glob(os.path.join(music_dir, f"{base_name}.*"))
+        if p.lower().endswith(AUDIO_EXTS)
+    ]
+    if existing:
+        return existing[0]
 
     cookies_path = None
     for candidate in ("/etc/secrets/cookies.txt", os.path.join(music_dir, "cookies.txt")):
@@ -159,19 +172,19 @@ async def _download_online_music(query: str, music_dir: str, logger):
             cookies_path = candidate
             break
 
-    # On cloud (Render) without YouTube cookies, use SoundCloud first (no datacenter IP block).
-    # If cookies exist (or locally), try YouTube first then fallback to SoundCloud.
     is_cloud = bool(os.environ.get("RENDER") or os.environ.get("SPACE_HOST"))
-    sources = (
-        [("ytsearch1", cookies_path), ("scsearch1", None)]
-        if (cookies_path or not is_cloud)
-        else [("scsearch1", None), ("ytsearch1", None)]
-    )
+    if is_cloud and not cookies_path:
+        # Skip YouTube on Render Free without cookies (avoids wasting 15s on guaranteed bot block)
+        sources = [("scsearch1", None)]
+    elif cookies_path or not is_cloud:
+        sources = [("ytsearch1", cookies_path), ("scsearch1", None)]
+    else:
+        sources = [("scsearch1", None)]
 
     last_err = None
     for prefix, cpath in sources:
         try:
-            path = await _run_yt_dlp(prefix, query, out_template, target_mp3, cpath, logger)
+            path = await _run_yt_dlp(prefix, query, music_dir, base_name, cpath, logger)
             _cleanup_old_cache(music_dir)
             return path
         except Exception as e:
