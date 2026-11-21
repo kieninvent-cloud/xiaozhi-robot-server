@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -U yt-dlp httpx
+    && pip install --no-cache-dir -U yt-dlp httpx SpeechRecognition
 
 WORKDIR /opt/xiaozhi-esp32-server
 
@@ -22,6 +22,7 @@ RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.
 COPY play_music.py /opt/xiaozhi-esp32-server/plugins_func/functions/play_music.py
 COPY tts_edge.py /opt/xiaozhi-esp32-server/core/providers/tts/edge.py
 COPY asr_openai.py /opt/xiaozhi-esp32-server/core/providers/asr/openai.py
+COPY llm_openai.py /opt/xiaozhi-esp32-server/core/providers/llm/openai/openai.py
 COPY config.template.yaml /opt/xiaozhi-esp32-server/config.template.yaml
 COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY start.sh /opt/xiaozhi-esp32-server/start.sh
