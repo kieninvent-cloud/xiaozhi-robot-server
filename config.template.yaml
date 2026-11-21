@@ -1,0 +1,98 @@
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  websocket: wss://__PUBLIC_HOST__/xiaozhi/v1/
+  vision_explain: https://__PUBLIC_HOST__/mcp/vision/explain
+  timezone_offset: +7
+  auth:
+    enabled: false
+
+log:
+  log_level: INFO
+  log_dir: tmp
+  log_file: "server.log"
+  data_dir: data
+
+delete_audio: true
+close_connection_no_voice_time: 120
+tts_timeout: 20
+tool_call_timeout: 45
+enable_wakeup_words_response_cache: false
+enable_greeting: true
+enable_stop_tts_notify: false
+
+exit_commands:
+  - "tạm biệt"
+  - "thoát"
+  - "tắt đi"
+  - "ngủ đi"
+  - "退出"
+
+prompt: |
+  Bạn là trợ lý robot AI thông minh, thân thiện và hài hước, giao tiếp hoàn toàn bằng Tiếng Việt tự nhiên, ngắn gọn (2-4 câu mỗi lượt để đọc qua loa nghe mượt mà).
+  Quy tắc quan trọng:
+  - Khi người dùng yêu cầu mở nhạc, phát bài hát bất kỳ (nhạc Việt, nhạc trẻ, remix, lofi, YouTube...), hãy gọi ngay công cụ `play_music` với tham số `song_name` là tên bài hát (kèm tên ca sĩ nếu có).
+  - Khi người dùng yêu cầu robot di chuyển (tiến lên, lùi lại, rẽ trái, rẽ phải, dừng lại), hãy gọi ngay công cụ `self.motor.drive` trên thiết bị ESP32.
+  - Luôn trả lời bằng Tiếng Việt có dấu rõ ràng, không dùng ký hiệu markdown phức tạp như ** hoặc ###.
+
+system_error_response: "Xin lỗi bạn, mình đang gặp chút trục trặc kết nối, bạn nói lại giúp mình nhé."
+
+end_prompt:
+  enable: false
+
+selected_module:
+  VAD: SileroVAD
+  ASR: GroqASR
+  LLM: GroqLLM
+  VLLM: GroqLLM
+  TTS: EdgeTTS
+  Memory: mem_local_short
+  Intent: function_call
+
+Intent:
+  function_call:
+    type: function_call
+    functions:
+      - play_music
+      - get_weather
+
+Memory:
+  mem_local_short:
+    type: mem_local_short
+    llm: GroqLLM
+
+ASR:
+  GroqASR:
+    type: openai
+    api_key: __GROQ_API_KEY__
+    base_url: https://api.groq.com/openai/v1/audio/transcriptions
+    model_name: whisper-large-v3
+    language: vi
+    output_dir: tmp/
+
+LLM:
+  GroqLLM:
+    type: openai
+    base_url: https://api.groq.com/openai/v1
+    model_name: qwen/qwen3.8-27b
+    api_key: __GROQ_API_KEY__
+    temperature: 0.7
+    max_tokens: 500
+    top_p: 1
+
+TTS:
+  EdgeTTS:
+    type: edge
+    voice: vi-VN-HoaiMyNeural
+    output_dir: tmp/
+    language: "Tiếng Việt"
+
+plugins:
+  play_music:
+    music_dir: "./music"
+    music_ext:
+      - ".mp3"
+      - ".wav"
+      - ".p3"
+    refresh_time: 60
