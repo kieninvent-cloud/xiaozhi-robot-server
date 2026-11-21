@@ -19,7 +19,7 @@ play_music_function_desc = {
     "type": "function",
     "function": {
         "name": "play_music",
-        "description": "Gọi công cụ này khi người dùng muốn nghe nhạc, mở bài hát bất kỳ (từ YouTube hoặc thư viện nhạc).",
+        "description": "Gọi công cụ này khi người dùng muốn nghe nhạc, mở bài hát bất kỳ (nhạc Việt, nhạc trẻ, remix, lofi...).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -40,7 +40,7 @@ async def play_music(conn: "ConnectionHandler", song_name: str):
         query = (song_name or "").strip()
         if not query or query.lower() == "random":
             query = "nhạc trẻ Việt Nam hay nhất"
-        await handle_youtube_or_local_music(conn, query)
+        await handle_online_or_local_music(conn, query)
         return ActionResponse(
             action=Action.RECORD,
             result=f"Đang phát bài hát: {query}",
@@ -51,7 +51,7 @@ async def play_music(conn: "ConnectionHandler", song_name: str):
         return ActionResponse(
             action=Action.RESPONSE,
             result=str(e),
-            response="Xin lỗi, mình không tìm hoặc tải được bài hát này trên YouTube.",
+            response="Xin lỗi, mình chưa tìm thấy bài hát này. Bạn thử nói tên bài khác nhé.",
         )
 
 
@@ -83,7 +83,7 @@ def _find_cached_file(query: str, music_dir: str):
     return best_match
 
 
-def _cleanup_old_cache(music_dir: str, max_files: int = 30):
+def _cleanup_old_cache(music_dir: str, max_files: int = 20):
     files = [
         os.path.join(music_dir, f)
         for f in os.listdir(music_dir)
@@ -99,16 +99,7 @@ def _cleanup_old_cache(music_dir: str, max_files: int = 30):
             pass
 
 
-async def _download_from_youtube(query: str, music_dir: str, logger):
-    safe_slug = re.sub(r"[^\w\s-]", "", query, flags=re.UNICODE).strip()[:40]
-    short_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:6]
-    base_name = f"{safe_slug}_{short_hash}" if safe_slug else f"yt_{short_hash}"
-    out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
-    target_mp3 = os.path.join(music_dir, f"{base_name}.mp3")
-
-    if os.path.exists(target_mp3):
-        return target_mp3
-
+async def _run_yt_dlp(search_prefix: str, query: str, out_template: str, target_mp3: str, cookies_path: str | None, logger):
     cmd = [
         sys.executable,
         "-m",
@@ -125,40 +116,76 @@ async def _download_from_youtube(query: str, music_dir: str, logger):
         "--audio-quality",
         "5",
         "--default-search",
-        "ytsearch1",
+        search_prefix,
         "-o",
         out_template,
         query,
     ]
-    cookies_path = os.path.join(music_dir, "cookies.txt")
-    if os.path.exists(cookies_path):
+    if cookies_path and os.path.exists(cookies_path):
         cmd.extend(["--cookies", cookies_path])
 
-    logger.bind(tag=TAG).info(f"Đang tải nhạc từ YouTube: {query}")
+    logger.bind(tag=TAG).info(f"Đang tải nhạc ({search_prefix}): {query}")
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=40)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=35)
     except asyncio.TimeoutError:
         proc.kill()
-        raise RuntimeError("Tải nhạc YouTube bị quá thời gian chờ")
+        raise RuntimeError(f"Tải nhạc ({search_prefix}) quá thời gian chờ")
 
     if proc.returncode != 0 or not os.path.exists(target_mp3):
         err_msg = stderr.decode("utf-8", errors="ignore")[-300:]
-        raise RuntimeError(f"yt-dlp lỗi ({proc.returncode}): {err_msg}")
+        raise RuntimeError(f"{search_prefix} lỗi ({proc.returncode}): {err_msg}")
 
-    _cleanup_old_cache(music_dir)
     return target_mp3
 
 
-async def handle_youtube_or_local_music(conn: "ConnectionHandler", query: str):
+async def _download_online_music(query: str, music_dir: str, logger):
+    safe_slug = re.sub(r"[^\w\s-]", "", query, flags=re.UNICODE).strip()[:40]
+    short_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:6]
+    base_name = f"{safe_slug}_{short_hash}" if safe_slug else f"song_{short_hash}"
+    out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
+    target_mp3 = os.path.join(music_dir, f"{base_name}.mp3")
+
+    if os.path.exists(target_mp3):
+        return target_mp3
+
+    cookies_path = None
+    for candidate in ("/etc/secrets/cookies.txt", os.path.join(music_dir, "cookies.txt")):
+        if os.path.exists(candidate):
+            cookies_path = candidate
+            break
+
+    # On cloud (Render) without YouTube cookies, use SoundCloud first (no datacenter IP block).
+    # If cookies exist (or locally), try YouTube first then fallback to SoundCloud.
+    is_cloud = bool(os.environ.get("RENDER") or os.environ.get("SPACE_HOST"))
+    sources = (
+        [("ytsearch1", cookies_path), ("scsearch1", None)]
+        if (cookies_path or not is_cloud)
+        else [("scsearch1", None), ("ytsearch1", None)]
+    )
+
+    last_err = None
+    for prefix, cpath in sources:
+        try:
+            path = await _run_yt_dlp(prefix, query, out_template, target_mp3, cpath, logger)
+            _cleanup_old_cache(music_dir)
+            return path
+        except Exception as e:
+            last_err = e
+            logger.bind(tag=TAG).warning(f"Nguồn {prefix} không tải được: {e}")
+
+    raise RuntimeError(str(last_err))
+
+
+async def handle_online_or_local_music(conn: "ConnectionHandler", query: str):
     music_dir = _get_music_dir(conn)
     music_path = _find_cached_file(query, music_dir)
     if not music_path:
-        music_path = await _download_from_youtube(query, music_dir, conn.logger)
+        music_path = await _download_online_music(query, music_dir, conn.logger)
 
     intro_text = f"Đang mở bài {query}, mời bạn cùng nghe nhé."
     conn.tts.store_tts_text(conn.sentence_id, intro_text)
