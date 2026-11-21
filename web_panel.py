@@ -409,7 +409,7 @@ class WebPanelHandler:
             body = await request.json()
             action = body.get("action", "stop")
             duration_ms = int(body.get("duration_ms", 1000))
-            res = await call_mcp_tool(conn, conn.mcp_client, "self.motor.drive", {"action": action, "duration_ms": duration_ms}, timeout=10)
+            res = await call_mcp_tool(conn, conn.mcp_client, "self_motor_drive", json.dumps({"action": action, "duration_ms": duration_ms}), timeout=10)
             return web.json_response({"ok": True, "result": res})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -420,8 +420,8 @@ class WebPanelHandler:
             return web.json_response({"ok": False, "error": "Robot chưa kết nối (hãy đánh thức Robot trước)"}, status=400)
         try:
             body = await request.json()
-            tool = "self.lamp.turn_on" if body.get("state") == "on" else "self.lamp.turn_off"
-            res = await call_mcp_tool(conn, conn.mcp_client, tool, {}, timeout=10)
+            tool = "self_lamp_turn_on" if body.get("state") == "on" else "self_lamp_turn_off"
+            res = await call_mcp_tool(conn, conn.mcp_client, tool, "{}", timeout=10)
             return web.json_response({"ok": True, "result": res})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -433,7 +433,7 @@ class WebPanelHandler:
         try:
             body = await request.json()
             vol = max(0, min(100, int(body.get("volume", 70))))
-            res = await call_mcp_tool(conn, conn.mcp_client, "self.audio_speaker.set_volume", {"volume": vol}, timeout=10)
+            res = await call_mcp_tool(conn, conn.mcp_client, "self_audio_speaker_set_volume", json.dumps({"volume": vol}), timeout=10)
             return web.json_response({"ok": True, "result": res})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -458,8 +458,8 @@ class WebPanelHandler:
             return web.json_response({"ok": True, "message": "Đã lưu trên Server (chưa có Robot online để gửi xuống NVS)"})
         try:
             body = await request.json()
-            if conn.mcp_client.has_tool("self.hardware.set_config"):
-                res = await call_mcp_tool(conn, conn.mcp_client, "self.hardware.set_config", body, timeout=10)
+            if conn.mcp_client.has_tool("self_hardware_set_config"):
+                res = await call_mcp_tool(conn, conn.mcp_client, "self_hardware_set_config", json.dumps(body), timeout=10)
                 return web.json_response({"ok": True, "message": f"Đã gửi cấu hình xuống ESP32 & đang khởi động lại! ({res})"})
             return web.json_response({"ok": True, "message": "Đã lưu trên Server! Cần nạp Phần 2 firmware ESP32 để nhận đổi GPIO từ xa."})
         except Exception as e:
