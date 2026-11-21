@@ -1,11 +1,13 @@
 import json
 import os
+import uuid
 from typing import Dict
 
 from aiohttp import web
 from config.logger import setup_logging
+from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
-from plugins_func.functions.play_music import handle_online_or_local_music
+from plugins_func.functions.play_music import _download_online_music, _find_cached_file, _get_music_dir
 
 TAG = __name__
 logger = setup_logging()
@@ -83,9 +85,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px; }
   .card h2 { margin:0 0 12px; font-size:15px; color:#93c5fd; }
   .dpad { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; max-width:240px; margin:10px auto; }
-  .btn { background:#334155; color:#fff; border:none; border-radius:10px; padding:12px; font-size:15px; font-weight:600; cursor:pointer; transition:.15s; }
+  .btn { background:#334155; color:#fff; border:none; border-radius:10px; padding:12px; font-size:15px; font-weight:600; cursor:pointer; transition:.15s; user-select:none; -webkit-user-select:none; touch-action:none; }
   .btn:hover { background:#475569; }
-  .btn:active { transform:scale(.96); }
+  .btn:active, .btn.holding { transform:scale(.95); filter:brightness(1.2); }
   .btn.pri { background:var(--pri); }
   .btn.pri:hover { background:#2563eb; }
   .btn.ok { background:#16a34a; }
@@ -116,20 +118,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- TAB 1: CONTROL -->
   <section id="tab-ctrl" class="panel active">
     <div class="card">
-      <h2>🚗 Điều khiển di chuyển</h2>
+      <h2>🚗 Lái Robot (Giữ phím để chạy, thả ra là dừng)</h2>
       <div class="dpad">
         <div></div>
-        <button class="btn pri" onclick="move('forward')">⬆️ Tiến</button>
+        <button class="btn pri rc-btn" data-act="forward">⬆️ Tiến</button>
         <div></div>
-        <button class="btn pri" onclick="move('turn_left')">⬅️ Trái</button>
-        <button class="btn err" onclick="move('stop')">⏹️ Dừng</button>
-        <button class="btn pri" onclick="move('turn_right')">➡️ Phải</button>
+        <button class="btn pri rc-btn" data-act="turn_left">⬅️ Trái</button>
+        <button class="btn err" onclick="stopDrive()">⏹️ Dừng</button>
+        <button class="btn pri rc-btn" data-act="turn_right">➡️ Phải</button>
         <div></div>
-        <button class="btn pri" onclick="move('backward')">⬇️ Lùi</button>
+        <button class="btn pri rc-btn" data-act="backward">⬇️ Lùi</button>
         <div></div>
       </div>
-      <label>Thời gian chạy mỗi lần bấm: <b id="durVal">1000</b> ms</label>
-      <input type="range" id="duration" min="200" max="5000" step="100" value="1000" oninput="document.getElementById('durVal').textContent=this.value" />
+      <p class="hint" style="text-align:center;">Hỗ trợ nhấn giữ trên màn hình cảm ứng, chuột, hoặc phím mũi tên / <b>W A S D</b> trên bàn phím!</p>
     </div>
 
     <div class="card">
@@ -273,13 +274,54 @@ async function loadSettings(){
     document.getElementById('pitchVal').textContent = s.tts_pitch || 0;
   }catch(e){}
 }
-async function move(action){
+let activeAct = null;
+let holdTimer = null;
+async function sendDrive(action, duration_ms){
   try{
-    const duration_ms = parseInt(document.getElementById('duration').value);
     await api('/api/control/motor', {action, duration_ms});
-    toast('Đã gửi lệnh: ' + action);
   }catch(e){ toast(e.message, false); }
 }
+function startDrive(action, el){
+  if(activeAct === action) return;
+  activeAct = action;
+  if(el) el.classList.add('holding');
+  clearInterval(holdTimer);
+  sendDrive(action, 10000);
+  holdTimer = setInterval(()=>{
+    if(activeAct === action) sendDrive(action, 10000);
+  }, 7000);
+}
+function stopDrive(el){
+  clearInterval(holdTimer);
+  holdTimer = null;
+  document.querySelectorAll('.rc-btn.holding').forEach(b=>b.classList.remove('holding'));
+  if(activeAct !== null || !el){
+    activeAct = null;
+    sendDrive('stop', 100);
+  }
+}
+document.querySelectorAll('.rc-btn').forEach(btn=>{
+  const act = btn.dataset.act;
+  btn.addEventListener('pointerdown', (e)=>{ e.preventDefault(); btn.setPointerCapture(e.pointerId); startDrive(act, btn); });
+  btn.addEventListener('pointerup', (e)=>{ e.preventDefault(); stopDrive(btn); });
+  btn.addEventListener('pointercancel', (e)=>{ e.preventDefault(); stopDrive(btn); });
+  btn.addEventListener('contextmenu', (e)=>e.preventDefault());
+});
+const keyMap = { ArrowUp:'forward', KeyW:'forward', ArrowDown:'backward', KeyS:'backward', ArrowLeft:'turn_left', KeyA:'turn_left', ArrowRight:'turn_right', KeyD:'turn_right' };
+window.addEventListener('keydown', (e)=>{
+  if(e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if(keyMap[e.code] && !e.repeat){
+    e.preventDefault();
+    const btn = document.querySelector(`.rc-btn[data-act="${keyMap[e.code]}"]`);
+    startDrive(keyMap[e.code], btn);
+  }
+});
+window.addEventListener('keyup', (e)=>{
+  if(keyMap[e.code] && activeAct === keyMap[e.code]){
+    e.preventDefault();
+    stopDrive();
+  }
+});
 async function lamp(state){
   try{
     await api('/api/control/lamp', {state});
@@ -447,7 +489,28 @@ class WebPanelHandler:
             song_name = (body.get("song_name") or "").strip()
             if not song_name:
                 return web.json_response({"ok": False, "error": "Thiếu tên bài hát"}, status=400)
-            await handle_online_or_local_music(conn, song_name)
+            music_dir = _get_music_dir(conn)
+            music_path = _find_cached_file(song_name, music_dir)
+            if not music_path:
+                music_path = await _download_online_music(song_name, music_dir, conn.logger)
+
+            sid = uuid.uuid4().hex
+            conn.sentence_id = sid
+            conn.client_abort = False
+            intro_text = f"Đang mở bài {song_name}, mời bạn cùng nghe nhé."
+            conn.tts.store_tts_text(sid, intro_text)
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.FIRST, content_type=ContentType.ACTION)
+            )
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.MIDDLE, content_type=ContentType.TEXT, content_detail=intro_text)
+            )
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.MIDDLE, content_type=ContentType.FILE, content_file=music_path)
+            )
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.LAST, content_type=ContentType.ACTION)
+            )
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)

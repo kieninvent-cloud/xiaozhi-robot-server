@@ -53,10 +53,6 @@ class TTSProvider(TTSProviderBase):
         self.edge_rate = f"{self.speech_rate:+}%"
         self.edge_volume = f"{self.volume:+}%"
         self.edge_pitch = f"{self.pitch_rate:+}Hz"
-        self._http = httpx.AsyncClient(
-            timeout=12.0,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
 
     def generate_filename(self, extension=".mp3"):
         return os.path.join(
@@ -87,15 +83,15 @@ class TTSProvider(TTSProviderBase):
             chunks.append(cur)
         return chunks
 
-    async def _fetch_google_chunk(self, chunk: str, speed: float = 1.0) -> bytes:
+    async def _fetch_google_chunk(self, client: httpx.AsyncClient, chunk: str, speed: float = 1.0) -> bytes:
         q = urllib.parse.quote(chunk)
         ttsspeed = max(0.5, min(1.5, speed))
         url = f"https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&ttsspeed={ttsspeed}&q={q}"
-        for attempt in range(2):
-            resp = await self._http.get(url)
+        for _ in range(2):
+            resp = await client.get(url)
             if resp.status_code == 200 and resp.content:
                 return resp.content
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.2)
         raise RuntimeError(f"Google TTS HTTP {resp.status_code}")
 
     async def _google_tts_bytes(self, text: str, rate_pct: int = 0) -> bytes:
@@ -103,10 +99,10 @@ class TTSProvider(TTSProviderBase):
         if not chunks:
             return b""
         speed = 1.0 + (rate_pct / 100.0)
-        # Fetch all chunks in parallel for zero pause on long paragraphs!
-        results = await asyncio.gather(
-            *(self._fetch_google_chunk(c, speed) for c in chunks)
-        )
+        async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            results = await asyncio.gather(
+                *(self._fetch_google_chunk(client, c, speed) for c in chunks)
+            )
         return b"".join(results)
 
     async def _edge_tts_bytes(self, text: str, voice: str, rate_pct: int, pitch_hz: int) -> bytes:
