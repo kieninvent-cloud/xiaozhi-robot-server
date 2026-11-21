@@ -15,6 +15,18 @@ from core.providers.asr.dto.dto import InterfaceType
 TAG = __name__
 logger = setup_logging()
 
+# Known Whisper silence hallucinations on Vietnamese audio
+HALLUCINATION_PHRASES = (
+    "la la school",
+    "ghiền mì gõ",
+    "hãy subscribe",
+    "đăng ký kênh",
+    "không bỏ lỡ những video",
+    "cảm ơn các bạn đã xem",
+    "cảm ơn các bạn đã theo dõi",
+    "thank you for watching",
+)
+
 
 class ASRProvider(ASRProviderBase):
     def __init__(self, config: dict, delete_audio_file: bool):
@@ -33,15 +45,18 @@ class ASRProvider(ASRProviderBase):
     def requires_file(self) -> bool:
         return True
 
-    def _prepare_normalized_wav(self, file_path: str) -> bytes:
-        """Boost quiet INMP441 mic audio to optimal loudness for Google/Whisper ASR."""
+    def _prepare_normalized_wav(self, file_path: str) -> Tuple[Optional[bytes], float]:
+        """Boost quiet INMP441 mic audio to optimal loudness; skip pure silence."""
         seg = AudioSegment.from_file(file_path)
         seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-        if seg.dBFS > -60:
-            seg = effects.normalize(seg, headroom=2.0)
+        dbfs = seg.dBFS
+        # Skip ultra-short or completely silent clips (< 250ms or < -52 dBFS)
+        if len(seg) < 250 or dbfs < -52:
+            return None, dbfs
+        seg = effects.normalize(seg, headroom=2.0)
         buf = io.BytesIO()
         seg.export(buf, format="wav")
-        return buf.getvalue()
+        return buf.getvalue(), dbfs
 
     def _recognize_google_vi(self, wav_bytes: bytes) -> str:
         with sr.AudioFile(io.BytesIO(wav_bytes)) as source:
@@ -64,6 +79,13 @@ class ASRProvider(ASRProviderBase):
             return resp.json().get("text", "").strip()
         raise RuntimeError(f"Groq ASR HTTP {resp.status_code}: {resp.text[:200]}")
 
+    @staticmethod
+    def _is_hallucination(text: str) -> bool:
+        low = (text or "").strip().lower()
+        if not low:
+            return True
+        return any(p in low for p in HALLUCINATION_PHRASES)
+
     async def speech_to_text(
         self, opus_data: List[bytes], session_id: str, artifacts=None
     ) -> Tuple[Optional[str], Optional[str]]:
@@ -74,9 +96,12 @@ class ASRProvider(ASRProviderBase):
 
         try:
             start_time = time.time()
-            wav_bytes = await asyncio.to_thread(self._prepare_normalized_wav, file_path)
+            wav_bytes, dbfs = await asyncio.to_thread(self._prepare_normalized_wav, file_path)
+            if wav_bytes is None:
+                logger.bind(tag=TAG).info(f"Bỏ qua đoạn âm thanh im lặng/quá ngắn (dBFS={dbfs:.1f})")
+                return "", file_path
 
-            # 1. Primary: Google Speech Recognition (vi-VN) - highest Vietnamese accuracy
+            # 1. Primary: Google Speech Recognition (vi-VN)
             try:
                 text = await asyncio.to_thread(self._recognize_google_vi, wav_bytes)
                 if text and text.strip():
@@ -85,12 +110,17 @@ class ASRProvider(ASRProviderBase):
                     )
                     return text.strip(), file_path
             except sr.UnknownValueError:
-                logger.bind(tag=TAG).warning("Google ASR không nghe rõ, thử Groq Whisper...")
+                # Google heard no intelligible speech -> ignore instead of letting Whisper hallucinate
+                logger.bind(tag=TAG).info("Google ASR: không có giọng nói rõ ràng, bỏ qua.")
+                return "", file_path
             except Exception as ge:
-                logger.bind(tag=TAG).warning(f"Google ASR lỗi ({ge}), chuyển sang Groq Whisper...")
+                logger.bind(tag=TAG).warning(f"Google ASR lỗi mạng ({ge}), chuyển sang Groq Whisper...")
 
-            # 2. Fallback: Groq Whisper large-v3
+            # 2. Fallback: Groq Whisper large-v3 (only on Google API/network error)
             text = await asyncio.to_thread(self._recognize_groq_whisper, wav_bytes)
+            if self._is_hallucination(text):
+                logger.bind(tag=TAG).info(f"Đã lọc ảo giác Whisper: {text}")
+                return "", file_path
             logger.bind(tag=TAG).info(
                 f"Groq Whisper ASR ({time.time() - start_time:.2f}s): {text}"
             )
