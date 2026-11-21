@@ -130,6 +130,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <button class="btn pri rc-btn" data-act="backward">⬇️ Lùi</button>
         <div></div>
       </div>
+      <label>⚡ Tốc độ động cơ: <b id="speedVal">80</b>%</label>
+      <input type="range" id="motorSpeed" min="30" max="100" step="5" value="80" oninput="document.getElementById('speedVal').textContent=this.value" />
       <p class="hint" style="text-align:center;">Hỗ trợ nhấn giữ trên màn hình cảm ứng, chuột, hoặc phím mũi tên / <b>W A S D</b> trên bàn phím!</p>
     </div>
 
@@ -278,7 +280,8 @@ let activeAct = null;
 let holdTimer = null;
 async function sendDrive(action, duration_ms){
   try{
-    await api('/api/control/motor', {action, duration_ms});
+    const speed = parseInt(document.getElementById('motorSpeed').value);
+    await api('/api/control/motor', {action, duration_ms, speed});
   }catch(e){ toast(e.message, false); }
 }
 function startDrive(action, el){
@@ -451,7 +454,10 @@ class WebPanelHandler:
             body = await request.json()
             action = body.get("action", "stop")
             duration_ms = int(body.get("duration_ms", 1000))
-            res = await call_mcp_tool(conn, conn.mcp_client, "self_motor_drive", json.dumps({"action": action, "duration_ms": duration_ms}), timeout=10)
+            payload = {"action": action, "duration_ms": duration_ms}
+            if "speed" in body and body["speed"] is not None:
+                payload["speed"] = max(0, min(100, int(body["speed"])))
+            res = await call_mcp_tool(conn, conn.mcp_client, "self_motor_drive", json.dumps(payload), timeout=10)
             return web.json_response({"ok": True, "result": res})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
