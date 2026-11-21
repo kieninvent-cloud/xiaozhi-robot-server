@@ -105,8 +105,7 @@ def _cleanup_old_cache(music_dir: str, max_files: int = 15):
 async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name: str, cookies_path: str | None, logger):
     out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
 
-    # Prefer native mp3 (yt-dlp skips ffmpeg re-encoding automatically when already mp3!)
-    # and guarantee .mp3 output so pydub AudioSegment.from_file(..., format="mp3") ALWAYS works.
+    # Use scsearch5 + --max-downloads 1 so if #1 is a 30s Go+ preview, it automatically grabs #2!
     cmd = [
         sys.executable,
         "-m",
@@ -119,6 +118,8 @@ async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name:
         "10",
         "--retries",
         "2",
+        "--max-downloads",
+        "1",
         "--match-filter",
         "duration >= 45 & duration <= 480",
         "-f",
@@ -144,7 +145,7 @@ async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=25)
     except asyncio.TimeoutError:
         proc.kill()
         raise RuntimeError(f"Tải nhạc ({search_prefix}) quá thời gian chờ")
@@ -153,7 +154,8 @@ async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name:
         p for p in glob.glob(os.path.join(music_dir, f"{base_name}.*"))
         if p.lower().endswith(AUDIO_EXTS)
     ]
-    if proc.returncode != 0 or not matches:
+    # Note: yt-dlp returns exit code 101 when --max-downloads 1 is reached (success!)
+    if proc.returncode not in (0, 101) or not matches:
         err_msg = stderr.decode("utf-8", errors="ignore")[-300:]
         raise RuntimeError(f"{search_prefix} lỗi ({proc.returncode}): {err_msg}")
 
@@ -181,11 +183,11 @@ async def _download_online_music(query: str, music_dir: str, logger):
     is_cloud = bool(os.environ.get("RENDER") or os.environ.get("SPACE_HOST"))
     if is_cloud and not cookies_path:
         # Skip YouTube on Render Free without cookies (avoids wasting 15s on guaranteed bot block)
-        sources = [("scsearch1", None)]
+        sources = [("scsearch5", None)]
     elif cookies_path or not is_cloud:
-        sources = [("ytsearch1", cookies_path), ("scsearch1", None)]
+        sources = [("ytsearch3", cookies_path), ("scsearch5", None)]
     else:
-        sources = [("scsearch1", None)]
+        sources = [("scsearch5", None)]
 
     last_err = None
     for prefix, cpath in sources:
