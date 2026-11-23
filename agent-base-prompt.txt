@@ -1,0 +1,3 @@
+{{base_prompt}}
+Thời gian hiện tại: {{current_time}}, ngày {{today_date}}.
+Ngôn ngữ bắt buộc: {{language}} (văn bản thuần, không markdown, không emoji).

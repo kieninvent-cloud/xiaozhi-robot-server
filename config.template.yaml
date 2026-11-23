@@ -49,7 +49,7 @@ selected_module:
   LLM: GroqLLM
   VLLM: GroqLLM
   TTS: EdgeTTS
-  Memory: mem_local_short
+  Memory: nomem
   Intent: function_call
 
 VAD:
@@ -65,9 +65,10 @@ Intent:
     type: function_call
     functions:
       - play_music
-      - get_weather
 
 Memory:
+  nomem:
+    type: nomem
   mem_local_short:
     type: mem_local_short
     llm: GroqLLM
@@ -77,7 +78,7 @@ ASR:
     type: openai
     api_key: __GROQ_API_KEY__
     base_url: https://api.groq.com/openai/v1/audio/transcriptions
-    model_name: whisper-large-v3
+    model_name: whisper-large-v3-turbo
     language: vi
     output_dir: tmp/
 
@@ -85,12 +86,12 @@ LLM:
   GroqLLM:
     type: openai
     base_url: https://api.groq.com/openai/v1
-    model_name: qwen/qwen3.8-27b
+    model_name: openai/gpt-oss-20b
     api_key: __GROQ_API_KEY__
-    temperature: 0.7
-    max_tokens: 1024
+    temperature: 0.6
+    max_tokens: 300
     top_p: 1
-    frequency_penalty: 0.3
+    frequency_penalty: 0.2
 
 TTS:
   EdgeTTS:

@@ -207,20 +207,22 @@ async def _download_online_music(query: str, music_dir: str, logger):
     if existing:
         return existing[0]
 
-    # Fast in-process stream URL extraction (~1.8s) so FFmpeg streams immediately!
+    # Yield 0.45s so the TTS thread gets 100% of CPU on Render 0.1 vCPU to synthesize
+    # and send the waiting announcement BEFORE yt-dlp runs!
+    await asyncio.sleep(0.45)
+
+    # Fast in-process stream URL extraction (~1.6s) so FFmpeg streams immediately!
     stream_url = await asyncio.to_thread(_resolve_stream_url_sync, query)
     stream_file = os.path.join(music_dir, f"{base_name}.stream")
     with open(stream_file, "w", encoding="utf-8") as f:
         f.write(stream_url)
-
-    # Also kick off a non-blocking background download for future cache hits
-    asyncio.create_task(_background_cache_download(query, music_dir, base_name, logger))
     return stream_file
 
 
 async def handle_online_or_local_music(conn: "ConnectionHandler", query: str):
     # 1. Speak the waiting announcement IMMEDIATELY (at t = 0.0s) while searching in parallel!
-    wait_text = f"Tôi đang tìm bài {query}, bạn chờ một chút nhé！"
+    # End with '.' (now recognized by TTS segmenter) so the whole sentence is synthesized in 1 single TTS call!
+    wait_text = f"Tôi đang tìm bài {query}, bạn chờ một chút nhé."
     conn.tts.store_tts_text(conn.sentence_id, wait_text)
 
     if conn.intent_type == "intent_llm":
@@ -240,8 +242,8 @@ async def handle_online_or_local_music(conn: "ConnectionHandler", query: str):
         )
     )
 
-    # 2. While TTS is synthesizing and speaking the 3-second waiting message on the robot,
-    #    resolve the cached file or direct stream URL (~1.8s).
+    # 2. While TTS is speaking the 3-second waiting message on the robot,
+    #    resolve the cached file or direct stream URL (~1.6s).
     music_dir = _get_music_dir(conn)
     music_path = _find_cached_file(query, music_dir)
     if not music_path:

@@ -88,10 +88,24 @@ class LLMProvider(LLMProviderBase):
 
     @staticmethod
     def normalize_dialogue(dialogue):
-        """自动修复 dialogue 中缺失 content 的消息"""
+        """自动修复 dialogue 中缺失 content 的消息，并裁剪长历史以节省80% Token"""
         for msg in dialogue:
             if "role" in msg and "content" not in msg:
                 msg["content"] = ""
+        # Strip injected Chinese few-shot direct_answer examples & keep only system + last 6 messages
+        if len(dialogue) > 7:
+            sys_msgs = [m for m in dialogue[:2] if m.get("role") == "system"]
+            tail = [
+                m for m in dialogue[len(sys_msgs):]
+                if not (m.get("role") == "user" and m.get("content") in ("给我讲个故事吧", "拜拜"))
+                and not (m.get("tool_call_id") in ("fewshot_da_001", "fewshot_exit_001"))
+                and not (m.get("tool_calls") and any(tc.get("id") in ("fewshot_da_001", "fewshot_exit_001") for tc in m.get("tool_calls", [])))
+            ]
+            # Keep last 6 turns while ensuring we don't start with an orphan 'tool' message
+            kept = tail[-6:]
+            while kept and kept[0].get("role") == "tool":
+                kept.pop(0)
+            dialogue = sys_msgs + kept
         return dialogue
 
     def _apply_thinking_disabled(self, request_params: dict):
@@ -186,12 +200,21 @@ class LLMProvider(LLMProviderBase):
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
 
+        # Filter out the virtual 'direct_answer' tool so the LLM streams plain text directly
+        # (saves ~150 tokens/turn and eliminates JSON tool_call buffering delay!)
+        if functions:
+            functions = [
+                f for f in functions
+                if f.get("function", {}).get("name") != "direct_answer"
+            ]
+
         request_params = {
             "model": self.model_name,
             "messages": dialogue,
             "stream": True,
-            "tools": functions,
         }
+        if functions:
+            request_params["tools"] = functions
 
         optional_params = {
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),

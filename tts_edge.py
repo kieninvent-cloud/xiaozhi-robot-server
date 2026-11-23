@@ -80,6 +80,12 @@ class TTSProvider(TTSProviderBase):
         self.edge_volume = f"{self.volume:+}%"
         self.edge_pitch = f"{self.pitch_rate:+}Hz"
 
+        # Crucial for Vietnamese/English: include ASCII '.' so sentences split immediately instead of waiting for Chinese '。'!
+        self.punctuations = (".", "。", "？", "?", "！", "!", "；", ";", "：", ":")
+        # Do NOT split the first sentence on ',' so short phrases like "Một, hai, ba" or "Tôi đang tìm bài X, bạn chờ một chút nhé."
+        # are synthesized as a single smooth sentence without pausing on every comma!
+        self.first_sentence_punctuations = (".", "。", "？", "?", "！", "!", "；", ";", "：", ":")
+
     def generate_filename(self, extension=".mp3"):
         return os.path.join(
             self.output_file,

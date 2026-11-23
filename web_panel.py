@@ -23,7 +23,7 @@ def _load_settings(config: dict) -> dict:
         "tts_engine": "google",
         "tts_rate": 0,
         "tts_pitch": 0,
-        "llm_model": config.get("LLM", {}).get("GroqLLM", {}).get("model_name", "qwen/qwen3.8-27b"),
+        "llm_model": config.get("LLM", {}).get("GroqLLM", {}).get("model_name", "openai/gpt-oss-20b"),
         "groq_api_key": "",
         "prompt": config.get("prompt", ""),
         "wake_word": "Jarvis",
@@ -176,10 +176,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>🧠 Mô hình AI, API Key & Vai trò trợ lý</h2>
       <label>Model AI (Groq)</label>
       <select id="llm_model">
-        <option value="qwen/qwen3.8-27b">Qwen 3.8 27B (Nhanh, chuẩn Tiếng Việt)</option>
+        <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B (Siêu nhanh 1000 tok/s, Rẻ hơn 75%)</option>
+        <option value="qwen/qwen3.8-27b">Qwen 3.8 27B (Chuẩn Tiếng Việt)</option>
         <option value="qwen/qwen3.6-27b">Qwen 3.6 27B</option>
         <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B (Thông minh cao)</option>
-        <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B (Siêu nhanh)</option>
       </select>
       <label>Groq API Key (để trống nếu giữ nguyên key hiện tại)</label>
       <input type="password" id="groq_api_key" placeholder="gsk_..." />
@@ -499,7 +499,7 @@ class WebPanelHandler:
             sid = uuid.uuid4().hex
             conn.sentence_id = sid
             conn.client_abort = False
-            wait_text = f"Tôi đang tìm bài {song_name}, bạn chờ một chút nhé！"
+            wait_text = f"Tôi đang tìm bài {song_name}, bạn chờ một chút nhé."
             conn.tts.store_tts_text(sid, wait_text)
             conn.tts.tts_text_queue.put(
                 TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.FIRST, content_type=ContentType.ACTION)
