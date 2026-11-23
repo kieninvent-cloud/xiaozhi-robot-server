@@ -76,6 +76,7 @@ class SimpleHttpServer:
                         web.post("/api/control/volume", self.web_panel.handle_volume),
                         web.post("/api/control/music", self.web_panel.handle_music),
                         web.post("/api/control/hardware", self.web_panel.handle_hardware),
+                        web.post("/api/control/autonomous", self.web_panel.handle_autonomous),
                         web.get("/mcp/vision/explain", self.vision_handler.handle_get),
                         web.post(
                             "/mcp/vision/explain", self.vision_handler.handle_post

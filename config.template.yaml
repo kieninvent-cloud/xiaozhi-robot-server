@@ -38,6 +38,7 @@ prompt: |
   - Khi người dùng hỏi thời tiết, hãy gọi ngay công cụ `get_weather`.
   - Khi người dùng hỏi giá xăng dầu hôm nay, giá vàng, tỷ giá hoặc tin tức thời sự mới nhất, hãy gọi ngay công cụ `web_search`.
   - Khi người dùng yêu cầu mở nhạc, phát bài hát bất kỳ, hãy gọi ngay công cụ `play_music` với `song_name` là tên bài hát chuẩn tiếng Việt (kèm ca sĩ nếu biết).
+  - Khi người dùng yêu cầu bật hoặc tắt chế độ tự hành (hoặc tự đi tuần tra, tự di chuyển tránh vật cản/chống rơi), hãy gọi ngay công cụ `self.autonomous.set_mode` với `enable: true` (bật) hoặc `enable: false` (tắt).
   - Khi người dùng yêu cầu robot di chuyển (tiến lên, lùi lại, rẽ trái, rẽ phải, dừng lại), hãy gọi ngay công cụ `self.motor.drive`.
   - Khi người dùng yêu cầu bật đèn hoặc tắt đèn LED, hãy gọi ngay công cụ `self.lamp.turn_on` hoặc `self.lamp.turn_off`.
   - CHỈ trả lời bằng Tiếng Việt có dấu, văn bản thuần, không dùng ký hiệu markdown như ** hoặc ###.

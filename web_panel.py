@@ -36,6 +36,11 @@ def _load_settings(config: dict) -> dict:
         "touch_mode": "hold_to_talk",
         "gpio_oled_sda": 9,
         "gpio_oled_scl": 46,
+        "gpio_tof_sda": 11,
+        "gpio_tof_scl": 10,
+        "auto_delta_a": 45,
+        "auto_delta_b": 55,
+        "auto_speed": 45,
     }
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -154,6 +159,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <p class="hint">Lưu ý: Robot cần đang kết nối phiên (đã đánh thức hoặc đang trò chuyện) để nhận lệnh điều khiển tức thì.</p>
     </div>
+
+    <div class="card">
+      <h2>🧭 Chế độ Tự hành (VL53L0X 45° — Tránh vật cản & Chống rơi)</h2>
+      <div class="row" style="margin-bottom:10px;">
+        <button class="btn ok" style="flex:1" onclick="setAutoMode(true)">🚀 Bật Tự hành (Đo gốc 4s)</button>
+        <button class="btn err" style="flex:1" onclick="setAutoMode(false)">⏹️ Tắt Tự hành</button>
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <button class="btn" style="width:100%;font-size:13px;" onclick="readAutoStatus()">📏 Đọc khoảng cách VL53L0X & Mặt phẳng gốc (x)</button>
+      </div>
+      <div id="tofStatusBox" class="hint" style="background:#0f172a;padding:8px 10px;border-radius:8px;border:1px solid var(--border);margin-bottom:8px;">
+        Mẹo: Bạn cũng có thể <b>chạm 3 lần liên tiếp vào cảm biến Touch</b> trên đầu Robot hoặc nói <i>"Bật chế độ tự hành"</i> để Robot tự đo mặt phẳng gốc <b>x</b> trong 4 giây và bắt đầu di chuyển!
+      </div>
+      <div class="grid2">
+        <div>
+          <label>Ngưỡng vật cản <b>a</b> (mm) [x − a]</label>
+          <input type="number" id="auto_delta_a" min="10" max="500" value="45" />
+        </div>
+        <div>
+          <label>Ngưỡng mép bàn <b>b</b> (mm) [x + b]</label>
+          <input type="number" id="auto_delta_b" min="10" max="500" value="55" />
+        </div>
+      </div>
+      <label>Tốc độ tự hành chậm nhất: <b id="autoSpeedVal">45</b>%</label>
+      <input type="range" id="auto_speed" min="30" max="80" step="5" value="45" oninput="document.getElementById('autoSpeedVal').textContent=this.value" />
+      <button class="btn pri" style="width:100%;margin-top:10px;" onclick="saveAutoConfig()">💾 Lưu thông số a, b & Tốc độ xuống Robot</button>
+    </div>
   </section>
 
   <!-- TAB 2: VOICE & AI -->
@@ -202,6 +234,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div><label>Cảm biến Touch (TTP223)</label><input type="number" id="gpio_touch" value="17" /></div>
         <div><label>OLED SDA</label><input type="number" id="gpio_oled_sda" value="9" /></div>
         <div><label>OLED SCL</label><input type="number" id="gpio_oled_scl" value="46" /></div>
+        <div><label>Cảm biến VL53L0X SDA</label><input type="number" id="gpio_tof_sda" value="11" /></div>
+        <div><label>Cảm biến VL53L0X SCL</label><input type="number" id="gpio_tof_scl" value="10" /></div>
       </div>
     </div>
 
@@ -269,11 +303,13 @@ async function loadSettings(){
     const s = d.settings || {};
     ['tts_engine','tts_rate','tts_pitch','llm_model','prompt','wake_word','touch_mode',
      'gpio_motor_l_in1','gpio_motor_l_in2','gpio_motor_r_in3','gpio_motor_r_in4',
-     'gpio_lamp','gpio_touch','gpio_oled_sda','gpio_oled_scl'].forEach(k=>{
+     'gpio_lamp','gpio_touch','gpio_oled_sda','gpio_oled_scl','gpio_tof_sda','gpio_tof_scl',
+     'auto_delta_a','auto_delta_b','auto_speed'].forEach(k=>{
       if(s[k] !== undefined && document.getElementById(k)) document.getElementById(k).value = s[k];
     });
     document.getElementById('rateVal').textContent = s.tts_rate || 0;
     document.getElementById('pitchVal').textContent = s.tts_pitch || 0;
+    if(s.auto_speed !== undefined) document.getElementById('autoSpeedVal').textContent = s.auto_speed;
   }catch(e){}
 }
 let activeAct = null;
@@ -373,12 +409,58 @@ async function saveHardware(){
       gpio_touch: parseInt(document.getElementById('gpio_touch').value),
       gpio_oled_sda: parseInt(document.getElementById('gpio_oled_sda').value),
       gpio_oled_scl: parseInt(document.getElementById('gpio_oled_scl').value),
+      gpio_tof_sda: parseInt(document.getElementById('gpio_tof_sda').value),
+      gpio_tof_scl: parseInt(document.getElementById('gpio_tof_scl').value),
       touch_mode: document.getElementById('touch_mode').value,
       wake_word: document.getElementById('wake_word').value,
     };
     await api('/api/settings', payload);
     const res = await api('/api/control/hardware', payload);
     toast(res.message || '⚡ Đã lưu & gửi cấu hình xuống ESP32!');
+  }catch(e){ toast(e.message, false); }
+}
+async function setAutoMode(enable){
+  try{
+    const res = await api('/api/control/autonomous', {action:'set_mode', enable});
+    toast(enable ? '🚀 Đã bật Tự hành! Robot đang đo mặt phẳng gốc 4s...' : '⏹️ Đã dừng chế độ Tự hành');
+    setTimeout(readAutoStatus, 1000);
+  }catch(e){ toast(e.message, false); }
+}
+async function saveAutoConfig(){
+  try{
+    const payload = {
+      action: 'set_config',
+      auto_delta_a: parseInt(document.getElementById('auto_delta_a').value),
+      auto_delta_b: parseInt(document.getElementById('auto_delta_b').value),
+      auto_speed: parseInt(document.getElementById('auto_speed').value),
+    };
+    await api('/api/settings', {
+      auto_delta_a: payload.auto_delta_a,
+      auto_delta_b: payload.auto_delta_b,
+      auto_speed: payload.auto_speed,
+    });
+    await api('/api/control/autonomous', payload);
+    toast('✅ Đã lưu thông số a=' + payload.auto_delta_a + 'mm, b=' + payload.auto_delta_b + 'mm xuống Robot!');
+  }catch(e){ toast(e.message, false); }
+}
+async function readAutoStatus(){
+  try{
+    const res = await api('/api/control/autonomous', {action:'get_status'});
+    const box = document.getElementById('tofStatusBox');
+    let info = res.result;
+    if(typeof info === 'string'){
+      try{ info = JSON.parse(info); }catch(_){}
+    }
+    if(info && typeof info === 'object'){
+      const st = info.running ? '🟢 Đang tự hành' : '⚪ Đang dừng';
+      const sens = info.sensor_connected ? '✅ Đã kết nối VL53L0X' : '❌ Chưa thấy VL53L0X';
+      const x = info.baseline_x_mm || 0;
+      const a = info.delta_a_mm || 45;
+      const b = info.delta_b_mm || 55;
+      box.innerHTML = `<b>${st}</b> | ${sens}<br/>Khoảng cách hiện tại: <b>${info.distance_mm} mm</b> | Gốc <b>x = ${x} mm</b> (Vật cản ≤ <b>${Math.max(25, x-a)} mm</b>, Mép bàn ≥ <b>${x+b} mm</b>)`;
+    } else {
+      box.textContent = 'Trạng thái: ' + JSON.stringify(res.result);
+    }
   }catch(e){ toast(e.message, false); }
 }
 loadSettings();
@@ -533,5 +615,30 @@ class WebPanelHandler:
                 res = await call_mcp_tool(conn, conn.mcp_client, "self_hardware_set_config", json.dumps(body), timeout=10)
                 return web.json_response({"ok": True, "message": f"Đã gửi cấu hình xuống ESP32 & đang khởi động lại! ({res})"})
             return web.json_response({"ok": True, "message": "Đã lưu trên Server! Cần nạp Phần 2 firmware ESP32 để nhận đổi GPIO từ xa."})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def handle_autonomous(self, request: web.Request):
+        conn = _get_active_conn()
+        if not conn:
+            return web.json_response({"ok": False, "error": "Robot chưa kết nối (hãy đánh thức Robot trước)"}, status=400)
+        try:
+            body = await request.json()
+            action = body.get("action", "get_status")
+            if action == "set_mode":
+                enable = bool(body.get("enable", True))
+                res = await call_mcp_tool(conn, conn.mcp_client, "self_autonomous_set_mode", json.dumps({"enable": enable}), timeout=10)
+                return web.json_response({"ok": True, "result": res})
+            elif action == "set_config":
+                payload = {
+                    "delta_a_mm": int(body.get("auto_delta_a", 45)),
+                    "delta_b_mm": int(body.get("auto_delta_b", 55)),
+                    "speed": int(body.get("auto_speed", 45)),
+                }
+                res = await call_mcp_tool(conn, conn.mcp_client, "self_autonomous_set_config", json.dumps(payload), timeout=10)
+                return web.json_response({"ok": True, "result": res})
+            else:
+                res = await call_mcp_tool(conn, conn.mcp_client, "self_autonomous_get_status", "{}", timeout=10)
+                return web.json_response({"ok": True, "result": res})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
