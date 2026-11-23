@@ -46,14 +46,16 @@ class ASRProvider(ASRProviderBase):
         return True
 
     def _prepare_normalized_wav(self, file_path: str) -> Tuple[Optional[bytes], float]:
-        """Boost quiet INMP441 mic audio to optimal loudness; skip pure silence."""
+        """Filter out low rumble / high hiss and boost quiet INMP441 mic audio to optimal loudness."""
         seg = AudioSegment.from_file(file_path)
         seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
         dbfs = seg.dBFS
-        # Skip ultra-short or completely silent clips (< 250ms or < -52 dBFS)
-        if len(seg) < 250 or dbfs < -52:
+        # Skip ultra-short or completely silent clips (< 220ms or < -52 dBFS)
+        if len(seg) < 220 or dbfs < -52:
             return None, dbfs
-        seg = effects.normalize(seg, headroom=2.0)
+        # Voice bandpass (85 Hz - 7500 Hz) removes room rumble & DC offset before peak normalization
+        seg = seg.high_pass_filter(85).low_pass_filter(7500)
+        seg = effects.normalize(seg, headroom=1.5)
         buf = io.BytesIO()
         seg.export(buf, format="wav")
         return buf.getvalue(), dbfs

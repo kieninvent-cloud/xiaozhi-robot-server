@@ -5,8 +5,11 @@ import hashlib
 import os
 import re
 import sys
+import threading
 import traceback
 from typing import TYPE_CHECKING
+
+import yt_dlp
 
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 from plugins_func.register import Action, ActionResponse, ToolType, register_function
@@ -17,6 +20,28 @@ if TYPE_CHECKING:
 TAG = __name__
 
 AUDIO_EXTS = (".mp3", ".m4a", ".opus", ".ogg", ".wav", ".p3")
+
+# Persistent shared YoutubeDL instance with pre-warmed SoundCloud client_id (~0.6s search + ~1.2s stream)
+_YDL_LOCK = threading.Lock()
+_SHARED_YDL = yt_dlp.YoutubeDL({
+    "quiet": True,
+    "no_warnings": True,
+    "noplaylist": True,
+    "extract_flat": "in_playlist",
+    "format": "http_mp3_1_0/bestaudio[ext=mp3]/bestaudio[abr<=128]/bestaudio",
+    "socket_timeout": 8,
+})
+
+
+def _warmup_ydl_bg():
+    try:
+        with _YDL_LOCK:
+            _SHARED_YDL.extract_info("scsearch1:nhac tre", download=False)
+    except Exception:
+        pass
+
+
+threading.Thread(target=_warmup_ydl_bg, daemon=True).start()
 
 play_music_function_desc = {
     "type": "function",
@@ -47,7 +72,7 @@ async def play_music(conn: "ConnectionHandler", song_name: str):
         return ActionResponse(
             action=Action.RECORD,
             result=f"Đang phát bài hát: {query}",
-            response=f"Đang mở bài {query} cho bạn nhé",
+            response=f"Tôi đang tìm bài {query}, bạn chờ một chút nhé.",
         )
     except Exception as e:
         conn.logger.bind(tag=TAG).error(f"Lỗi phát nhạc: {e}\n{traceback.format_exc()}")
@@ -102,64 +127,72 @@ def _cleanup_old_cache(music_dir: str, max_files: int = 15):
             pass
 
 
-async def _run_yt_dlp(search_prefix: str, query: str, music_dir: str, base_name: str, cookies_path: str | None, logger):
-    out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
+def _resolve_stream_url_sync(query: str) -> str:
+    """Resolve a direct SoundCloud HTTP MP3 stream URL in ~1.8s using the pre-warmed shared YoutubeDL instance."""
+    with _YDL_LOCK:
+        info = _SHARED_YDL.extract_info(f"scsearch5:{query}", download=False)
+        entries = (info or {}).get("entries") or []
+        chosen_url = None
+        for entry in entries:
+            if not entry:
+                continue
+            dur = entry.get("duration") or 0
+            # Filter out 30s SoundCloud Go+ previews and >10min mixes
+            if 45 <= dur <= 540:
+                chosen_url = entry.get("url") or entry.get("webpage_url")
+                break
+        if not chosen_url and entries:
+            first = entries[0] or {}
+            chosen_url = first.get("url") or first.get("webpage_url")
+        if not chosen_url:
+            raise RuntimeError(f"Không tìm thấy bài hát phù hợp cho: {query}")
 
-    # Use scsearch5 + --max-downloads 1 so if #1 is a 30s Go+ preview, it automatically grabs #2!
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
-        "--quiet",
-        "--no-warnings",
-        "--no-playlist",
-        "--force-overwrites",
-        "--socket-timeout",
-        "10",
-        "--retries",
-        "2",
-        "--max-downloads",
-        "1",
-        "--match-filter",
-        "duration >= 45 & duration <= 480",
-        "-f",
-        "bestaudio[ext=mp3]/bestaudio[abr<=128]/bestaudio",
-        "-x",
-        "--audio-format",
-        "mp3",
-        "--audio-quality",
-        "5",
-        "--default-search",
-        search_prefix,
-        "-o",
-        out_template,
-        query,
-    ]
-    if cookies_path and os.path.exists(cookies_path):
-        cmd.extend(["--cookies", cookies_path])
+        track_info = _SHARED_YDL.extract_info(chosen_url, download=False)
+        stream_url = (track_info or {}).get("url")
+        if not stream_url and (track_info or {}).get("formats"):
+            for fmt in reversed(track_info["formats"]):
+                if fmt.get("url") and fmt.get("protocol") in ("http", "https"):
+                    stream_url = fmt["url"]
+                    break
+            if not stream_url:
+                stream_url = track_info["formats"][-1].get("url")
+        if not stream_url:
+            raise RuntimeError("Không lấy được luồng phát trực tiếp")
+        return stream_url
 
-    logger.bind(tag=TAG).info(f"Đang tải nhanh ({search_prefix}): {query}")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+
+async def _background_cache_download(query: str, music_dir: str, base_name: str, logger):
+    """Download the MP3 in the background for instant future replays."""
     try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=25)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError(f"Tải nhạc ({search_prefix}) quá thời gian chờ")
-
-    matches = [
-        p for p in glob.glob(os.path.join(music_dir, f"{base_name}.*"))
-        if p.lower().endswith(AUDIO_EXTS)
-    ]
-    # Note: yt-dlp returns exit code 101 when --max-downloads 1 is reached (success!)
-    if proc.returncode not in (0, 101) or not matches:
-        err_msg = stderr.decode("utf-8", errors="ignore")[-300:]
-        raise RuntimeError(f"{search_prefix} lỗi ({proc.returncode}): {err_msg}")
-
-    return matches[0]
+        out_template = os.path.join(music_dir, f"{base_name}.%(ext)s")
+        cmd = [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--quiet",
+            "--no-warnings",
+            "--no-playlist",
+            "--max-downloads",
+            "1",
+            "--match-filter",
+            "duration >= 45 & duration <= 540",
+            "-f",
+            "http_mp3_1_0/bestaudio[ext=mp3]/bestaudio[abr<=128]/bestaudio",
+            "--default-search",
+            "scsearch5",
+            "-o",
+            out_template,
+            query,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=40)
+        _cleanup_old_cache(music_dir)
+    except Exception as e:
+        logger.bind(tag=TAG).debug(f"Background music cache skipped: {e}")
 
 
 async def _download_online_music(query: str, music_dir: str, logger):
@@ -174,42 +207,21 @@ async def _download_online_music(query: str, music_dir: str, logger):
     if existing:
         return existing[0]
 
-    cookies_path = None
-    for candidate in ("/etc/secrets/cookies.txt", os.path.join(music_dir, "cookies.txt")):
-        if os.path.exists(candidate):
-            cookies_path = candidate
-            break
+    # Fast in-process stream URL extraction (~1.8s) so FFmpeg streams immediately!
+    stream_url = await asyncio.to_thread(_resolve_stream_url_sync, query)
+    stream_file = os.path.join(music_dir, f"{base_name}.stream")
+    with open(stream_file, "w", encoding="utf-8") as f:
+        f.write(stream_url)
 
-    is_cloud = bool(os.environ.get("RENDER") or os.environ.get("SPACE_HOST"))
-    if is_cloud and not cookies_path:
-        # Skip YouTube on Render Free without cookies (avoids wasting 15s on guaranteed bot block)
-        sources = [("scsearch5", None)]
-    elif cookies_path or not is_cloud:
-        sources = [("ytsearch3", cookies_path), ("scsearch5", None)]
-    else:
-        sources = [("scsearch5", None)]
-
-    last_err = None
-    for prefix, cpath in sources:
-        try:
-            path = await _run_yt_dlp(prefix, query, music_dir, base_name, cpath, logger)
-            _cleanup_old_cache(music_dir)
-            return path
-        except Exception as e:
-            last_err = e
-            logger.bind(tag=TAG).warning(f"Nguồn {prefix} không tải được: {e}")
-
-    raise RuntimeError(str(last_err))
+    # Also kick off a non-blocking background download for future cache hits
+    asyncio.create_task(_background_cache_download(query, music_dir, base_name, logger))
+    return stream_file
 
 
 async def handle_online_or_local_music(conn: "ConnectionHandler", query: str):
-    music_dir = _get_music_dir(conn)
-    music_path = _find_cached_file(query, music_dir)
-    if not music_path:
-        music_path = await _download_online_music(query, music_dir, conn.logger)
-
-    intro_text = f"Đang mở bài {query}, mời bạn cùng nghe nhé."
-    conn.tts.store_tts_text(conn.sentence_id, intro_text)
+    # 1. Speak the waiting announcement IMMEDIATELY (at t = 0.0s) while searching in parallel!
+    wait_text = f"Tôi đang tìm bài {query}, bạn chờ một chút nhé！"
+    conn.tts.store_tts_text(conn.sentence_id, wait_text)
 
     if conn.intent_type == "intent_llm":
         conn.tts.tts_text_queue.put(
@@ -224,9 +236,18 @@ async def handle_online_or_local_music(conn: "ConnectionHandler", query: str):
             sentence_id=conn.sentence_id,
             sentence_type=SentenceType.MIDDLE,
             content_type=ContentType.TEXT,
-            content_detail=intro_text,
+            content_detail=wait_text,
         )
     )
+
+    # 2. While TTS is synthesizing and speaking the 3-second waiting message on the robot,
+    #    resolve the cached file or direct stream URL (~1.8s).
+    music_dir = _get_music_dir(conn)
+    music_path = _find_cached_file(query, music_dir)
+    if not music_path:
+        music_path = await _download_online_music(query, music_dir, conn.logger)
+
+    # 3. Enqueue the audio stream right behind the waiting announcement
     conn.tts.tts_text_queue.put(
         TTSMessageDTO(
             sentence_id=conn.sentence_id,

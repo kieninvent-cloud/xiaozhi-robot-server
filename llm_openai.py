@@ -112,6 +112,13 @@ class LLMProvider(LLMProviderBase):
         parsed_url = urlparse(self.base_url)
         domain = parsed_url.netloc
         model_name = (self.model_name or "").lower()
+        if "groq.com" in domain:
+            if "qwen3" in model_name:
+                request_params.setdefault("extra_body", {}).update({"reasoning_effort": "none"})
+                return
+            elif "gpt-oss" in model_name:
+                request_params.setdefault("extra_body", {}).update({"reasoning_effort": "low"})
+                return
         for disabled_domain, params in THINKING_DISABLED_DOMAINS.items():
             if disabled_domain not in domain:
                 continue

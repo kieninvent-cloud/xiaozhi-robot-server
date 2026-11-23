@@ -495,22 +495,24 @@ class WebPanelHandler:
             song_name = (body.get("song_name") or "").strip()
             if not song_name:
                 return web.json_response({"ok": False, "error": "Thiếu tên bài hát"}, status=400)
+
+            sid = uuid.uuid4().hex
+            conn.sentence_id = sid
+            conn.client_abort = False
+            wait_text = f"Tôi đang tìm bài {song_name}, bạn chờ một chút nhé！"
+            conn.tts.store_tts_text(sid, wait_text)
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.FIRST, content_type=ContentType.ACTION)
+            )
+            conn.tts.tts_text_queue.put(
+                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.MIDDLE, content_type=ContentType.TEXT, content_detail=wait_text)
+            )
+
             music_dir = _get_music_dir(conn)
             music_path = _find_cached_file(song_name, music_dir)
             if not music_path:
                 music_path = await _download_online_music(song_name, music_dir, conn.logger)
 
-            sid = uuid.uuid4().hex
-            conn.sentence_id = sid
-            conn.client_abort = False
-            intro_text = f"Đang mở bài {song_name}, mời bạn cùng nghe nhé."
-            conn.tts.store_tts_text(sid, intro_text)
-            conn.tts.tts_text_queue.put(
-                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.FIRST, content_type=ContentType.ACTION)
-            )
-            conn.tts.tts_text_queue.put(
-                TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.MIDDLE, content_type=ContentType.TEXT, content_detail=intro_text)
-            )
             conn.tts.tts_text_queue.put(
                 TTSMessageDTO(sentence_id=sid, sentence_type=SentenceType.MIDDLE, content_type=ContentType.FILE, content_file=music_path)
             )

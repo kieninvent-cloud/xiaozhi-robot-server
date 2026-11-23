@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import threading
 import uuid
 import urllib.parse
 from datetime import datetime
@@ -11,6 +12,31 @@ import httpx
 from core.providers.tts.base import TTSProviderBase
 
 SETTINGS_FILE = os.path.abspath("./data/web_settings.json")
+_THREAD_LOCAL = threading.local()
+
+
+def _get_thread_http_client() -> httpx.Client:
+    client = getattr(_THREAD_LOCAL, "http_client", None)
+    if client is None or client.is_closed:
+        client = httpx.Client(
+            timeout=10.0,
+            headers={"User-Agent": "Mozilla/5.0"},
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=60.0),
+        )
+        _THREAD_LOCAL.http_client = client
+    return client
+
+
+def _fetch_google_chunk_sync(chunk: str, speed: float = 1.0) -> bytes:
+    q = urllib.parse.quote(chunk)
+    ttsspeed = max(0.5, min(1.5, speed))
+    url = f"https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&ttsspeed={ttsspeed}&q={q}"
+    client = _get_thread_http_client()
+    for _ in range(2):
+        resp = client.get(url)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+    raise RuntimeError(f"Google TTS HTTP {resp.status_code}")
 
 
 def _load_live_tts_settings():
@@ -83,26 +109,12 @@ class TTSProvider(TTSProviderBase):
             chunks.append(cur)
         return chunks
 
-    async def _fetch_google_chunk(self, client: httpx.AsyncClient, chunk: str, speed: float = 1.0) -> bytes:
-        q = urllib.parse.quote(chunk)
-        ttsspeed = max(0.5, min(1.5, speed))
-        url = f"https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&ttsspeed={ttsspeed}&q={q}"
-        for _ in range(2):
-            resp = await client.get(url)
-            if resp.status_code == 200 and resp.content:
-                return resp.content
-            await asyncio.sleep(0.2)
-        raise RuntimeError(f"Google TTS HTTP {resp.status_code}")
-
     async def _google_tts_bytes(self, text: str, rate_pct: int = 0) -> bytes:
         chunks = self._split_chunks(text, max_len=180)
         if not chunks:
             return b""
         speed = 1.0 + (rate_pct / 100.0)
-        async with httpx.AsyncClient(timeout=12.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
-            results = await asyncio.gather(
-                *(self._fetch_google_chunk(client, c, speed) for c in chunks)
-            )
+        results = [_fetch_google_chunk_sync(c, speed) for c in chunks]
         return b"".join(results)
 
     async def _edge_tts_bytes(self, text: str, voice: str, rate_pct: int, pitch_hz: int) -> bytes:
