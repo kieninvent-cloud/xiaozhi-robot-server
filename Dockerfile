@@ -26,6 +26,7 @@ COPY tts_edge.py /opt/xiaozhi-esp32-server/core/providers/tts/edge.py
 COPY asr_openai.py /opt/xiaozhi-esp32-server/core/providers/asr/openai.py
 COPY llm_openai.py /opt/xiaozhi-esp32-server/core/providers/llm/openai/openai.py
 COPY util.py /opt/xiaozhi-esp32-server/core/utils/util.py
+COPY intent_handler.py /opt/xiaozhi-esp32-server/core/handle/intentHandler.py
 COPY agent-base-prompt.txt /opt/xiaozhi-esp32-server/agent-base-prompt.txt
 COPY web_panel.py /opt/xiaozhi-esp32-server/core/api/web_panel.py
 COPY http_server.py /opt/xiaozhi-esp32-server/core/http_server.py
