@@ -20,6 +20,8 @@ RUN git clone --depth 1 https://github.com/xinnan-tech/xiaozhi-esp32-server.git 
 RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
 
 COPY play_music.py /opt/xiaozhi-esp32-server/plugins_func/functions/play_music.py
+COPY get_weather.py /opt/xiaozhi-esp32-server/plugins_func/functions/get_weather.py
+COPY web_search.py /opt/xiaozhi-esp32-server/plugins_func/functions/web_search.py
 COPY tts_edge.py /opt/xiaozhi-esp32-server/core/providers/tts/edge.py
 COPY asr_openai.py /opt/xiaozhi-esp32-server/core/providers/asr/openai.py
 COPY llm_openai.py /opt/xiaozhi-esp32-server/core/providers/llm/openai/openai.py

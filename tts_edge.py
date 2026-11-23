@@ -10,9 +10,12 @@ from datetime import datetime
 import edge_tts
 import httpx
 from core.providers.tts.base import TTSProviderBase
+from core.utils import textUtils
 
 SETTINGS_FILE = os.path.abspath("./data/web_settings.json")
 _THREAD_LOCAL = threading.local()
+# Match Vietnamese formatted numbers like 1.000.000 or 28.500 or 1,000,000 (dots/commas followed by 3 digits)
+_THOUSANDS_SEP_RE = re.compile(r"(?<=\d)[.,](?=\d{3}(?!\d))")
 
 
 def _get_thread_http_client() -> httpx.Client:
@@ -92,6 +95,66 @@ class TTSProvider(TTSProviderBase):
             f"tts-{datetime.now().date()}@{uuid.uuid4().hex}{extension}",
         )
 
+    def _get_segment_text(self):
+        full_text = "".join(self.tts_text_buff)
+        current_text = full_text[self.processed_chars :]
+        punctuations_to_use = (
+            self.first_sentence_punctuations
+            if self.is_first_sentence
+            else self.punctuations
+        )
+
+        # Find the first sentence-ending punctuation, but NEVER split on dots/commas inside numbers (e.g. 1.000.000 or 28.500 or 3.14)!
+        first_punct_pos = -1
+        n = len(current_text)
+        for i, ch in enumerate(current_text):
+            if ch not in punctuations_to_use:
+                continue
+            if ch in (".", ","):
+                prev_is_digit = i > 0 and current_text[i - 1].isdigit()
+                if prev_is_digit:
+                    # Wait for more characters if '.' is right after a digit at the end of the stream buffer
+                    if i + 1 >= n:
+                        if not self.tts_stop_request:
+                            continue
+                    elif current_text[i + 1].isdigit():
+                        # Inside a number like 28.500 or 1.000.000 -> NOT a sentence boundary!
+                        continue
+            first_punct_pos = i
+            break
+
+        cut_pos = -1
+        if first_punct_pos != -1:
+            cut_pos = self._quote_safe_cut(
+                current_text, first_punct_pos, punctuations_to_use
+            )
+        if cut_pos != -1:
+            segment_text_raw = current_text[: cut_pos + 1]
+            segment_text = textUtils.get_string_no_punctuation_or_emoji(
+                segment_text_raw
+            )
+            self.processed_chars += len(segment_text_raw)
+            if self.is_first_sentence:
+                self.is_first_sentence = False
+            return segment_text
+        elif self.tts_stop_request and current_text:
+            self.is_first_sentence = True
+            return current_text
+        return None
+
+    @staticmethod
+    def _normalize_vi_numbers_for_tts(text: str) -> str:
+        """Convert 1.000.000 / 28.500 to 1000000 / 28500 so TTS reads 'một triệu' / 'hai mươi tám nghìn năm trăm'."""
+        if not text:
+            return ""
+        # Repeatedly strip thousand separators (e.g. 1.000.000 -> 1000000)
+        prev = None
+        cur = text
+        while cur != prev:
+            prev = cur
+            cur = _THOUSANDS_SEP_RE.sub("", cur)
+        return cur
+
     @staticmethod
     def _split_chunks(text: str, max_len: int = 180):
         clean = re.sub(r"\s+", " ", (text or "").strip())
@@ -148,6 +211,7 @@ class TTSProvider(TTSProviderBase):
         raise RuntimeError(f"Edge TTS failed: {last_err}")
 
     async def text_to_speak(self, text, output_file):
+        text = self._normalize_vi_numbers_for_tts(text)
         live = _load_live_tts_settings()
         engine = live.get("tts_engine", self.tts_engine)
         rate_pct = int(live.get("tts_rate", self.speech_rate) or 0)
